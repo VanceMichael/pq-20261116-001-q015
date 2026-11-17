@@ -15,7 +15,10 @@ export function createHttpServer(archive, { host = "127.0.0.1", port = 8080, log
       const status = error.statusCode ?? (error instanceof TypeError || error instanceof RangeError ? 400 : 500);
       if (status >= 500) logger.error?.({ requestId, error: error.message });
       if (response.headersSent) return response.destroy(error);
-      writeJson(response, status, { error: status >= 500 ? "internal_error" : "invalid_request", message: error.message });
+      const code = error.name === "DeliveryError" ? error.code : status >= 500 ? "internal_error" : "invalid_request";
+      const body = { error: code, message: error.message };
+      if (error.details !== undefined) body.details = error.details;
+      writeJson(response, status, body);
     }
   });
   return {
@@ -120,6 +123,28 @@ async function routeRequest(request, response, archive) {
     const result = archive.articleTimeline(feedId, articleId, url.searchParams.get("limit"));
     return result ? writeJson(response, 200, result) : notFound(response);
   }
+  if (segments[3] === "delivery" && segments[4]) {
+    if (segments.length === 5 && segments[4] === "retention" && request.method === "POST") {
+      const body = await readOptionalJson(request);
+      const result = archive.sweepDelivery(feedId, { now: body?.now });
+      return writeJson(response, 200, result);
+    }
+    const consumerId = segments[4];
+    if (segments.length === 5 && request.method === "POST") {
+      const body = await readJson(request);
+      const result = archive.registerDeliveryConsumer(feedId, consumerId, { startAt: body.startAt });
+      return writeJson(response, result.status, result);
+    }
+    if (segments.length === 5 && request.method === "GET") {
+      const result = archive.readDelivery(feedId, consumerId, { limit: url.searchParams.get("limit") });
+      return writeJson(response, 200, result);
+    }
+    if (segments.length === 6 && segments[5] === "checkpoint" && request.method === "POST") {
+      const body = await readJson(request);
+      const result = archive.checkpointDelivery(feedId, consumerId, Number(body.seq));
+      return writeJson(response, result.status, result);
+    }
+  }
   return notFound(response);
 }
 
@@ -135,6 +160,16 @@ function readJson(request) {
       throw new TypeError("request body must be valid JSON");
     }
   });
+}
+
+async function readOptionalJson(request) {
+  const buffer = await readBody(request);
+  if (!buffer.length) return {};
+  try {
+    return JSON.parse(buffer.toString("utf8"));
+  } catch {
+    throw new TypeError("request body must be valid JSON");
+  }
 }
 
 function readBody(request) {

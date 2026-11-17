@@ -3,6 +3,7 @@ import { FeedRepository } from "../store/feed-repository.js";
 import { CaptureRepository } from "../store/capture-repository.js";
 import { ArticleRepository } from "../store/article-repository.js";
 import { FetchRepository } from "../store/fetch-repository.js";
+import { DeliveryRepository } from "../store/delivery-repository.js";
 import { ImportService } from "../ingest/import-service.js";
 import { PageFetcher } from "../acquisition/page-fetcher.js";
 import { RefreshService } from "./refresh-service.js";
@@ -13,6 +14,7 @@ import { ReviewService } from "./review-service.js";
 import { CsvExporter } from "../export/csv-exporter.js";
 import { ArticleTimelineService } from "./article-timeline.js";
 import { IntegrityAuditService } from "./integrity-audit.js";
+import { DeliveryService } from "./delivery-service.js";
 
 export class NewsArchive {
   constructor(filename, options = {}) {
@@ -23,11 +25,20 @@ export class NewsArchive {
     this.articles = new ArticleRepository(this.database);
     this.fetches = new FetchRepository(this.database);
     this.reviews = new ReviewRepository(this.database);
+    this.deliveryStore = new DeliveryRepository(this.database);
+    this.delivery = new DeliveryService({
+      database: this.database,
+      feeds: this.feeds,
+      delivery: this.deliveryStore,
+      clock: this.clock,
+      retentionDays: options.retentionDays
+    });
     this.imports = new ImportService({
       database: this.database,
       feeds: this.feeds,
       captures: this.captures,
       articles: this.articles,
+      delivery: this.delivery,
       clock: this.clock
     });
     this.refreshes = new RefreshService({
@@ -110,6 +121,26 @@ export class NewsArchive {
 
   auditIntegrity() {
     return this.integrityAudit.run();
+  }
+
+  registerDeliveryConsumer(feedId, consumerId, options) {
+    return this.delivery.registerConsumer(feedId, consumerId, options);
+  }
+
+  readDelivery(feedId, consumerId, options) {
+    return this.delivery.read(feedId, consumerId, options);
+  }
+
+  checkpointDelivery(feedId, consumerId, seq) {
+    return this.delivery.checkpoint(feedId, consumerId, seq);
+  }
+
+  sweepDelivery(feedId, options) {
+    return this.delivery.sweep(feedId, options);
+  }
+
+  recoverDelivery() {
+    return this.delivery.indexPending({ limit: 500 });
   }
 
   close() {

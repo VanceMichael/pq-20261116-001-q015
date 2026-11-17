@@ -36,15 +36,23 @@ export class ArticleRepository {
 
   recordCapture(captureId, feed, records, capturedAt) {
     const present = new Set();
+    const staged = [];
     for (const [index, record] of records.entries()) {
       this.upsertArticle.run(feed.feedId, record.canonicalUrl, record.title, record.publishedAt,
         capturedAt, capturedAt);
       const articleId = Number(this.getArticleId.get(feed.feedId, record.canonicalUrl).article_id);
       this.insertCaptureItem.run(captureId, articleId, record.sourceIndex ?? index);
       present.add(record.canonicalUrl);
+      staged.push({
+        articleId,
+        canonicalUrl: record.canonicalUrl,
+        title: record.title,
+        publishedAt: record.publishedAt ?? null,
+        sourceIndex: record.sourceIndex ?? index
+      });
     }
     this.markMissing.run(feed.missingThreshold, feed.feedId, capturedAt);
-    return present.size;
+    return { observedCount: present.size, staged };
   }
 
   list(feedId, { visibility = null, limit = 50, offset = 0 } = {}) {

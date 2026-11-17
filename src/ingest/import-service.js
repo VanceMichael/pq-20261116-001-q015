@@ -4,11 +4,12 @@ import { validateFeedId } from "../store/feed-repository.js";
 import { assessCapture, validateCapturedAt } from "./capture-policy.js";
 
 export class ImportService {
-  constructor({ database, feeds, captures, articles, clock = () => new Date() }) {
+  constructor({ database, feeds, captures, articles, delivery = null, clock = () => new Date() }) {
     this.database = database;
     this.feeds = feeds;
     this.captures = captures;
     this.articles = articles;
+    this.delivery = delivery;
     this.clock = clock;
   }
 
@@ -45,10 +46,18 @@ export class ImportService {
         reason: policy.reason
       });
       if (policy.accepted) {
-        this.articles.recordCapture(captureId, feed, normalized.records, capturedAt);
+        const recorded = this.articles.recordCapture(captureId, feed, normalized.records, capturedAt);
+        // Staged inside the same transaction: once the capture commits, its
+        // delivery payload is durable even if the process exits before indexing.
+        this.delivery?.stage(captureId, feedId, capturedAt, recorded.staged);
         this.feeds.markAccepted(feedId, capturedAt, normalized.records.length);
       }
       this.database.exec("COMMIT");
+      if (policy.accepted && this.delivery) {
+        // Indexing is crash-safe and idempotent; a failure here must not undo
+        // the committed capture, and later reads/refresh will retry it.
+        this.delivery.catchUp();
+      }
       return {
         captureId,
         feedId,

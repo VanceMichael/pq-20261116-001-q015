@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export function openDatabase(filename) {
   const path = resolve(filename);
@@ -17,7 +17,8 @@ export function migrate(database) {
   const version = database.prepare("PRAGMA user_version").get().user_version;
   if (version > SCHEMA_VERSION) throw new Error(`database schema ${version} is newer than supported ${SCHEMA_VERSION}`);
   if (version === SCHEMA_VERSION) return;
-  database.exec(`
+  if (version === 0) {
+    database.exec(`
     BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS feeds (
       feed_id TEXT PRIMARY KEY,
@@ -95,6 +96,72 @@ export function migrate(database) {
     PRAGMA user_version = 1;
     COMMIT;
   `);
+  }
+  if (database.prepare("PRAGMA user_version").get().user_version === 1) {
+    database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS delivery_inbox (
+      inbox_id INTEGER PRIMARY KEY,
+      feed_id TEXT NOT NULL REFERENCES feeds(feed_id),
+      capture_id INTEGER NOT NULL REFERENCES captures(capture_id),
+      captured_at TEXT NOT NULL,
+      article_id INTEGER NOT NULL REFERENCES articles(article_id),
+      canonical_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      published_at TEXT,
+      source_index INTEGER NOT NULL,
+      UNIQUE(capture_id, article_id)
+    );
+    CREATE INDEX IF NOT EXISTS delivery_inbox_pending ON delivery_inbox(capture_id);
+    CREATE TABLE IF NOT EXISTS delivery_events (
+      seq INTEGER PRIMARY KEY,
+      feed_seq INTEGER NOT NULL,
+      feed_id TEXT NOT NULL REFERENCES feeds(feed_id),
+      capture_id INTEGER NOT NULL REFERENCES captures(capture_id),
+      event_type TEXT NOT NULL CHECK(event_type IN ('observed', 'field_corrected', 'omitted')),
+      article_id INTEGER NOT NULL REFERENCES articles(article_id),
+      canonical_url TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      source_index INTEGER,
+      payload_json TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS delivery_events_feed_seq ON delivery_events(feed_id, feed_seq);
+    CREATE INDEX IF NOT EXISTS delivery_events_article ON delivery_events(feed_id, article_id, feed_seq);
+    CREATE TABLE IF NOT EXISTS delivery_index_state (
+      capture_id INTEGER PRIMARY KEY REFERENCES captures(capture_id),
+      feed_id TEXT NOT NULL,
+      event_count INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS delivery_consumers (
+      consumer_id TEXT NOT NULL,
+      feed_id TEXT NOT NULL REFERENCES feeds(feed_id),
+      last_acked_seq INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(feed_id, consumer_id)
+    );
+    CREATE TABLE IF NOT EXISTS delivery_feed_state (
+      feed_id TEXT PRIMARY KEY REFERENCES feeds(feed_id),
+      retained_from_seq INTEGER NOT NULL DEFAULT 1,
+      last_seq INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    -- Backfill the crash-safe delivery inbox for accepted captures that
+    -- existed before the delivery schema, so recovery treats every accepted
+    -- capture uniformly instead of failing on missing staging rows.
+    INSERT INTO delivery_inbox
+      (feed_id, capture_id, captured_at, article_id, canonical_url, title, published_at, source_index)
+    SELECT c.feed_id, c.capture_id, c.captured_at, a.article_id, a.canonical_url, a.title,
+      a.published_at, ci.source_index
+    FROM captures c
+    JOIN capture_items ci ON ci.capture_id = c.capture_id
+    JOIN articles a ON a.article_id = ci.article_id
+    WHERE c.accepted = 1;
+    PRAGMA user_version = 2;
+    COMMIT;
+  `);
+  }
 }
 
 export function closeDatabase(database) {
